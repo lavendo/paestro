@@ -1,0 +1,652 @@
+#!/bin/bash
+
+import argparse
+import os
+import re
+import sys
+from copy import copy
+
+class ModuloRing:
+   def __init__(self, **kwargs):
+      self.modulus = kwargs['modulus']
+      self.offset = kwargs.setdefault('offset', 0)
+
+   def delta(self, modulo):
+      if not isinstance(modulo, ModuloRing):
+         raise TypeError("argument must be a ModuloRing object")
+
+      return self.offset - modulo.offset
+
+   def truncate(self):
+      self.offset %= self.modulus
+
+   def __int__(self):
+      return self.offset % self.modulus
+
+   def __add__(self, value):
+      new_ring = copy(self)
+      new_ring.offset += int(value)
+      return new_ring
+
+   def __iadd__(self, value):
+      self.offset += int(value)
+      return self
+
+   def __radd__(self, value):
+      new_ring = copy(self)
+      new_ring.offset = int(value) + new_ring.offset
+      return new_ring
+
+   def __sub__(self, value):
+      new_ring = copy(self)
+      new_ring.offset -= int(value)
+      return new_ring
+
+   def __isub__(self, value):
+      self.offset -= int(value)
+      return self
+
+   def __rsub__(self, value):
+      new_ring = copy(self)
+      new_ring.offset = int(value) - new_ring.offset
+      return new_ring
+
+   def __hash__(self):
+      return hash((self.offset, self.modulus))
+
+   def __cmp__(self, other):
+      if not isinstance(other, ModuloRing):
+         raise ValueError('other object must be a ModuloRing instance')
+
+      if not self.modulus == other.modulus:
+         return cmp(self.modulus, other.modulus)
+
+      return cmp(int(self), int(other))
+
+class Semitone(ModuloRing):
+   KEYS = None
+
+   def __init__(self, **kwargs):
+      self.keys = kwargs.setdefault('keys', self.KEYS)
+
+      if not self.keys or not len(self.keys):
+         raise ValueError('no keys provided to Semitone object')
+
+      kwargs['modulus'] = len(self.keys)
+      ModuloRing.__init__(self, **kwargs)
+
+   def octave(self):
+      return abs(self.offset / self.modulus)
+
+   def octave_semitone(self):
+      return self.__class__(offset=self.octave() * self.modulus)
+
+   def identify(self):
+      return str(self)
+
+   def __repr__(self):
+      return '<%s: %d>' % (self.__class__.__name__, int(self))
+
+   def __str__(self):
+      return self.keys[int(self)]
+
+class WesternSemitone(Semitone):
+   ROOT_KEYS = tuple('CDEFGAB')
+   KEYS = ('C','CD','D','DE','E','F','FG','G','GA','A','AB','B')
+   BIAS_SHARP = 0
+   BIAS_FLAT = 1
+   BIAS = 1
+
+   def __init__(self, **kwargs):
+      Semitone.__init__(self, **kwargs)
+      self.bias = kwargs.setdefault('bias', self.BIAS)
+
+      if not kwargs.has_key('key'):
+         return
+
+      key = kwargs['key']
+
+      if not isinstance(key, (str, unicode)) or not re.match('^[A-G](?:bb?|##?)?$', key):
+         raise TypeError('key must be [A-G](bb?|##?)')
+
+      key_data = re.match('^(?P<root>[A-G])(?P<accidental>bb?|##?)?$', key).groupdict()
+      value = self.keys.index(key_data['root'])
+      accidental = key_data['accidental']
+
+      if accidental:
+         value += {'b': -1, '#': 1}[accidental[0]] * len(accidental)
+
+         if accidental.endswith('#'):
+            self.bias = WesternSemitone.BIAS_SHARP
+         else:
+            self.bias = WesternSemitone.BIAS_FLAT
+
+      self.offset = value % self.modulus
+
+   def identify(self, relative_key=None, relative_octave=0):
+      if not relative_key:
+         key = str(self)
+
+         if len(key) > 1:
+            key = key[self.bias]
+
+            if self.bias == WesternSemitone.BIAS_FLAT:
+               key = '%s%s' % (key, 'b')
+            elif self.bias == WesternSemitone.BIAS_SHARP:
+               key = '%s%s' % (key, '#')
+
+         return key
+
+      root_relative = WesternSemitone(key=relative_key) + (relative_octave*12)
+      root_delta = self.delta(root_relative)
+
+      if root_delta < 0:
+         relative_key = '%s%s' % (relative_key, 'b' * abs(root_delta))
+      elif root_delta > 0:
+         relative_key = '%s%s' % (relative_key, '#' * abs(root_delta))
+
+      return relative_key
+
+class ToneDelta:
+   DELTAS = None
+   ROOT_TONE = None
+
+   def __init__(self, **kwargs):
+      self.root_tone = kwargs.setdefault('root_tone', self.ROOT_TONE)
+      self.deltas = kwargs.setdefault('deltas', self.DELTAS)
+
+      if self.root_tone and not isinstance(self.root_tone, Semitone):
+         raise ValueError('root_tone must be a Semitone object')
+
+      if not self.deltas:
+         raise ValueError('no list of deltas supplied')
+
+      self.deltas = list(self.deltas)
+
+   def render(self, root_tone=None):
+      if not root_tone:
+         root_tone = self.root_tone
+
+      if not root_tone:
+         raise ValueError('no root to render from')
+
+      scale = [copy(root_tone)]
+
+      for delta in self.deltas:
+         scale.append(scale[-1]+delta)
+
+      return tuple(scale)
+
+   def identify(self, root_tone=None):
+      return map(lambda x: (x.identify(), x), self.render(root_tone))
+
+   def is_tonal_subset_of(self, tone_delta):
+      my_notes = set(self.render())
+      their_notes = set(tone_delta.render())
+
+      return my_notes <= their_notes
+
+   def is_tonal_superset_of(self, tone_delta):
+      my_notes = set(self.render())
+      their_notes = set(tone_delta.render())
+
+      return my_notes >= their_notes
+
+   def __repr__(self):
+      return '<%s: %s>' % (self.__class__.__name__, str(self))
+
+   def __str__(self):
+      return ' '.join(map(lambda x: x[0], self.identify()))
+
+   def __cmp__(self, other):
+      if not isinstance(other, ToneDelta):
+         raise ValueError('other object must be a ToneDelta object')
+
+      my_deltas = list(self.deltas)
+      their_deltas = list(other.deltas)
+
+      if not my_deltas == their_deltas:
+         return cmp(my_deltas, their_deltas)
+
+      return cmp(self.root_tone, other.root_tone)
+
+   def __hash__(self):
+      return hash((self.root_tone, tuple(self.deltas)))
+
+class WesternToneDelta(ToneDelta):
+   ROOT_KEY = 'C'
+
+   def __init__(self, **kwargs):
+      if not kwargs.has_key('root_tone'):
+         self.root_key = kwargs.setdefault('root_key', self.ROOT_KEY)
+         kwargs['root_tone'] = WesternSemitone(key=kwargs.setdefault('root_key', self.ROOT_KEY))
+      else:
+         self.root_key = str(kwargs['root_tone'])
+
+         if len(self.root_key) > 1:
+            self.root_key = self.root_key[kwargs['root_tone'].bias]
+
+      ToneDelta.__init__(self, **kwargs)
+
+   def piano_roll(self):
+      black_keys = ''' __ _ _ _ __ __ _ _ _ _ _ __
+|  | | | |  |  | | | | | |  |
+|  | | | |  |  | | | | | |  |
+|  | | | |  |  | | | | | |  |
+|  |%s| |%s|  |  |%s| |%s| |%s|  |
+|  |_| |_|  |  |_| |_| |_|  |'''
+
+      white_keys = '''
+| %s | %s | %s | %s | %s | %s | %s |
+|___|___|___|___|___|___|___|'''
+
+      key_labels = [' ']*12
+      i = 1
+
+      for frequency in self.render():
+         value = int(frequency)
+
+         if key_labels[value] == ' ':
+            key_labels[int(frequency)] = str(i)
+
+         i += 1
+
+      k = key_labels
+      return '%s%s' % (black_keys % (k[1],k[3],k[6],k[8],k[10])
+                      ,white_keys % (k[0],k[2],k[4],k[5],k[7],k[9],k[11]))
+
+class Scale(WesternToneDelta):
+   SCALE_NAME = None
+
+   def __init__(self, **kwargs):
+      self.scale_name = kwargs.setdefault('scale_name', self.SCALE_NAME)
+      WesternToneDelta.__init__(self, **kwargs)
+
+      if not sum(self.deltas) == 12:
+         raise ValueError('sum of scale deltas does not equal 12')
+
+   def identify(self):
+      notes = self.render()
+      root_keys = WesternSemitone.ROOT_KEYS
+      root_ring = ModuloRing(modulus=len(root_keys), offset=root_keys.index(self.root_key[0]))
+      octave = 0
+      identities = list()
+
+      for note in notes:
+         ring_key = root_keys[int(root_ring)]
+         identities.append((note.identify(ring_key, root_ring.offset / root_ring.modulus), note))
+         root_ring += 1
+
+      return identities
+
+class MajorScale(Scale):
+   SCALE_NAME = 'major'
+   DELTAS = (2,2,1,2,2,2,1)
+
+class NaturalMinorScale(Scale):
+   SCALE_NAME = 'natural minor'
+   DELTAS = (2,1,2,2,1,2,2)
+
+class HarmonicMinorScale(Scale):
+   SCALE_NAME = 'harmonic minor'
+   DELTAS = (2,1,2,2,1,3,1)
+
+class MelodicMinorScale(Scale):
+   SCALE_NAME = 'melodic minor'
+   DELTAS = (2,1,2,2,2,2,1)
+
+class Chord(ToneDelta):
+   ROOT_POSITION = 0
+
+   def __init__(self, **kwargs):
+      self.root_position = kwargs.setdefault('root_position', self.ROOT_POSITION)
+      ToneDelta.__init__(self, **kwargs)
+
+   def in_scale(self, scale):
+      scale_tones = scale.render()
+      scale_toneset = set(scale_tones)
+      chords = list()
+
+      for tone in scale_tones:
+         chord_toneset = set(self.render(tone))
+
+         if chord_toneset < scale_toneset:
+            new_chord = copy(self)
+            new_chord.root_tone = copy(tone)
+            chords.append(new_chord)
+
+      return chords
+
+   def __repr__(self):
+      if self.root_position == 0:
+         return ToneDelta.__repr__(self)
+
+      notes = self.render()
+      return '<%s: %s [root: %d]>' % (self.__class__.__name__, str(self), self.root_position)
+
+class WesternChord(Chord, WesternToneDelta):
+   CHORD_NAME = None
+
+   def __init__(self, **kwargs):
+      self.chord_name = kwargs.setdefault('chord_name', self.CHORD_NAME)
+
+      Chord.__init__(self, **kwargs)
+      WesternToneDelta.__init__(self, **kwargs)
+
+   def get_chord_name(self):
+      if not self.chord_name:
+         raise ValueError('no base chord name in chord class')
+
+      position = ['1st','2nd','3rd']
+
+      if not self.root_position == 0:
+         chord_name = '%s, %s position' % (self.chord_name, position[len(self.deltas) - self.root_position])
+      else:
+         chord_name = self.chord_name
+
+      return chord_name
+
+   def invert(self, order=1):
+      if order > len(self.deltas):
+         raise ValueError('inversion order greater than possible permutations')
+
+      for i in xrange(order):
+         new_deltas = self.deltas[1:]
+         new_deltas.append(12 - sum(self.deltas))
+         self.deltas = new_deltas
+         self.root_position = (self.root_position - 1) % (len(self.deltas)+1)
+
+   def __repr__(self):
+      if not self.chord_name:
+         return WesternToneDelta.__repr__(self)
+
+      chord_name = self.get_chord_name()
+      return '<%s %s: %s> ' % (self.root_key, chord_name, str(self))
+
+class MajorChord(WesternChord):
+   CHORD_NAME = 'major'
+   DELTAS = (4, 3)
+
+class MinorChord(WesternChord):
+   CHORD_NAME = 'minor'
+   DELTAS = (3, 4)
+
+class AugmentedChord(WesternChord):
+   CHORD_NAME = 'augmented'
+   DELTAS = (4, 4) # LOL WHO NEEDS INVERSIONS WHEN YOU'RE A FUCKING TRIANGLE
+
+class DiminishedChord(WesternChord):
+   CHORD_NAME = 'diminished'
+   DELTAS = (3, 3)
+
+class DominantSeventhChord(WesternChord):
+   CHORD_NAME = 'dominant seventh'
+   DELTAS = (4, 3, 3)
+
+class MajorSeventhChord(WesternChord):
+   CHORD_NAME = 'major seventh'
+   DELTAS = (4, 3, 4)
+
+class MinorSeventhChord(WesternChord):
+   CHORD_NAME = 'minor seventh'
+   DELTAS = (3, 4, 3)
+
+class HalfDiminishedSeventhChord(WesternChord):
+   CHORD_NAME = 'half-diminished seventh'
+   DELTAS = (3, 3, 4)
+
+class DiminishedSeventhChord(WesternChord):
+   CHORD_NAME = 'diminished seventh'
+   DELTAS = (3, 3, 3)
+
+class MinorMajorSeventhChord(WesternChord):
+   CHORD_NAME = 'minor-major seventh'
+   DELTAS = (3, 4, 4)
+
+class AugmentedMajorSeventhChord(WesternChord):
+   CHORD_NAME = 'augmented major seventh'
+   DELTAS = (4, 4, 3)
+
+class AugmentedSeventhChord(WesternChord):
+   CHORD_NAME = 'augmented seventh'
+   DELTAS = (4, 4, 2)
+
+def parse_chord(chord):
+   key_groups = re.match('^(?P<root>[A-G][b#]?)(?P<accidental>[Mm\+o7]|m7[co]?|m?M7|M?7\+)(?P<inversion>,[1-9])?$', chord)
+
+   if not key_groups:
+      raise ValueError("chord must match [A-G][b#]?([Mm\+o7]|m7[co]?|m?M7|M?7\+)(,[1-9])?")
+
+   key_groups = key_groups.groupdict()
+   root = key_groups['root']
+
+   # Cb/B# make modulo calculations go fucking bonkers.
+   if root == 'Cb' or root == 'B#':
+      root = 'C'
+
+   accidental = key_groups['accidental']
+   chord = {
+      'M':   MajorChord,
+      'm':   MinorChord,
+      '+':   AugmentedChord,
+      'o':   DiminishedChord,
+      '7':   DominantSeventhChord,
+      'M7':  MajorSeventhChord,
+      'm7':  MinorSeventhChord,
+      'm7c': HalfDiminishedSeventhChord,
+      'm7o': DiminishedSeventhChord,
+      'mM7': MinorMajorSeventhChord,
+      'M7+': AugmentedMajorSeventhChord,
+      '7+':  AugmentedSeventhChord
+   }[accidental](root_key=root)
+
+   inversion = key_groups['inversion']
+
+   if inversion:
+      chord.invert(int(inversion[1:]))
+
+   return chord
+
+def parse_scale(scale):
+   key_groups = re.match('^(?P<root>[A-G][b#]?)(?P<accidental>[Mm]7?)$', scale)
+
+   if not key_groups:
+      raise ValueError("scale must match [A-G][b#]?[Mm]7?")
+
+   key_groups = key_groups.groupdict()
+   root = key_groups['root']
+
+   # Cb/B# make modulo calculations go fucking bonkers.
+   if root == 'Cb' or root == 'B#':
+      root = 'C'
+
+   accidental = key_groups['accidental']
+   return {
+      'M':   MajorScale,
+      'm':   NaturalMinorScale,
+      'm7':  HarmonicMinorScale,
+      'M7':  MelodicMinorScale
+   }[accidental](root_key=root)
+
+def perform_analysis(chords, scales, args, current_depth=1):
+   new_chords = set()
+   new_scales = set()
+
+   chords = list(chords)
+   scales = list(scales)
+
+   while len(chords):
+      chord = chords.pop(0)
+
+      if not chord:
+         continue
+
+      if args.chord_scales:
+         possible_scales = [MajorScale,NaturalMinorScale,HarmonicMinorScale,MelodicMinorScale]
+         working_chord = copy(chord)
+         origin_root = working_chord.root_position
+
+         applicable_scales = dict()
+
+         for possible_scale in possible_scales:
+            for inversions in xrange(len(working_chord.deltas)):
+               root_tone = copy(working_chord.root_tone)
+               root_tone.truncate()
+
+               for i in xrange(root_tone.modulus):
+                  new_scale = possible_scale(root_key=root_tone.identify())
+
+                  if working_chord.is_tonal_subset_of(new_scale):
+                     applicable_scales.setdefault(copy(working_chord), set()).add(new_scale)
+                     new_scales.add(new_scale)
+
+                     if not working_chord.root_position == origin_root:
+                        new_chords.add(copy(working_chord))
+
+                  root_tone.offset += 1
+                  root_tone.offset = int(root_tone)
+
+               working_chord.invert()
+
+         captured_chords = applicable_scales.keys()
+         captured_chords.sort(lambda x,y: cmp(x.root_position, y.root_position))
+
+         for scaled_chord in captured_chords:
+            if not scaled_chord.root_position == 0:
+               print 'Chord inversion: %s %s => %s' % (scaled_chord.root_key, scaled_chord.get_chord_name(), str(scaled_chord))
+            else:
+               print 'Chord: %s %s => %s' % (scaled_chord.root_key, scaled_chord.get_chord_name(), str(scaled_chord))
+
+            if args.piano_roll:
+               print scaled_chord.piano_roll()
+
+            for new_scale in applicable_scales[scaled_chord]:
+               print 'Applicable scale: %s %s => %s' % (new_scale.root_key, new_scale.scale_name, str(new_scale))
+
+               if args.piano_roll:
+                  print new_scale.piano_roll()
+
+   while len(scales):
+      scale = scales.pop(0)
+
+      if not scale:
+         continue
+
+      print 'Scale: %s' % str(scale)
+
+      if args.piano_roll:
+         print scale.piano_roll()
+
+   '''
+   for scale in scale_set:
+      target_chords = map(lambda c: c(root_key=root)
+                         ,(MajorChord
+                          ,MinorChord
+                          ,AugmentedChord
+                          ,DiminishedChord
+                          ,DominantSeventhChord
+                          ,MajorSeventhChord
+                          ,MinorSeventhChord
+                          ,HalfDiminishedSeventhChord
+                          ,DiminishedSeventhChord
+                          ,MinorMajorSeventhChord
+                          ,AugmentedMajorSeventhChord
+                          ,AugmentedSeventhChord))
+   '''
+
+   if not len(new_chords) and not len(new_scales):
+      return
+   elif current_depth < args.depth:
+      perform_analysis(new_chords, new_scales, args, current_depth+1)
+
+def main():
+   parser = argparse.ArgumentParser(
+      formatter_class=argparse.RawDescriptionHelpFormatter,
+
+      description='''
+      Paestro is a simple python program used to perform various operations
+      on western musical key spaces.''',
+
+      epilog='''
+      To make things easier, Paestro uses notations based on standard
+      symbols with a slight variation. Scales can be explained with a
+      simple regex:
+
+         [A-G][b#]?([Mm]7?)?
+
+      The following are examples of scales and their interpretations
+      by Paestro:
+
+         FM       F Major
+         A#m      A Sharp Natural Minor
+         Cm7      C Harmonic Minor
+         EbM7     E Flat Melodic Minor
+
+      A similar format is followed for chords, with the following
+      symbols representing each:
+
+         M        Major chord
+         m        Minor chord
+         +        Augmented chord
+         o        Diminished chord
+         7        Dominant seventh chord
+         M7       Major seventh chord
+         m7       Minor seventh chord
+         m7c      Half-diminished seventh chord
+         m7o      Diminished seventh chord
+         mM7      Minor-major seventh chord
+         M7+      Augmented major seventh chord
+         7+       Augmented seventh chord
+
+      Adding a comma and a number after a chord value will invert it
+      up to the amount of possible permutations. The following are
+      examples of chords and their interpretations by Paestro:
+
+         F+       F Augmented
+         A#m7c    A Sharp Half-Diminished Seventh
+         CM,1     C Major, First Inversion
+         EbmM7,3  E Flat Minor-Major Seventh, Third Inversion\n''')
+
+   parser.add_argument('-c'
+                      ,'--chord'
+                      ,help='the chord to analyze. see the help for chord formats.')
+   parser.add_argument('-s'
+                      ,'--scale'
+                      ,help='the scale to analyze. see the help for scale formats.')
+   parser.add_argument('-C'
+                      ,'--chord-scales'
+                      ,action='store_true'
+                      ,help='select scales where the given chord appears.')
+   parser.add_argument('-S'
+                      ,'--scale-chords'
+                      ,action='store_true'
+                      ,help='select chords where the given scale appears.')
+   parser.add_argument('-d'
+                      ,'--depth'
+                      ,default=1
+                      ,type=int
+                      ,help='recursion depth for chord and scale analysis.')
+   parser.add_argument('-p'
+                      ,'--piano-roll'
+                      ,action='store_true'
+                      ,help='show the piano roll of resulting chords and scales.')
+
+   args = parser.parse_args()
+   chord = None
+   scale = None
+
+   if not getattr(args, 'chord', None) and not getattr(args, 'scale', None):
+      sys.stderr.write('error: neither chord nor scale provided.')
+      parser.print_help()
+      sys.exit(1)
+
+   if getattr(args, 'chord', None):
+      chord = parse_chord(args.chord)
+
+   if getattr(args, 'scale', None):
+      scale = parse_scale(args.scale)
+
+   perform_analysis([chord], [scale], args)
+
+if __name__ == '__main__':
+   main()
