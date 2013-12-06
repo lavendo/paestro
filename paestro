@@ -52,7 +52,7 @@ class ModuloRing:
       return new_ring
 
    def __hash__(self):
-      return hash((self.offset, self.modulus))
+      return hash((int(self), self.modulus))
 
    def __cmp__(self, other):
       if not isinstance(other, ModuloRing):
@@ -184,6 +184,9 @@ class ToneDelta:
       my_notes = set(self.render())
       their_notes = set(tone_delta.render())
 
+      #print repr(self), ',', repr(tone_delta), ',', my_notes & their_notes
+      #print my_notes
+      #print their_notes
       return my_notes <= their_notes
 
    def is_tonal_superset_of(self, tone_delta):
@@ -302,26 +305,10 @@ class Chord(ToneDelta):
       self.root_position = kwargs.setdefault('root_position', self.ROOT_POSITION)
       ToneDelta.__init__(self, **kwargs)
 
-   def in_scale(self, scale):
-      scale_tones = scale.render()
-      scale_toneset = set(scale_tones)
-      chords = list()
-
-      for tone in scale_tones:
-         chord_toneset = set(self.render(tone))
-
-         if chord_toneset < scale_toneset:
-            new_chord = copy(self)
-            new_chord.root_tone = copy(tone)
-            chords.append(new_chord)
-
-      return chords
-
    def __repr__(self):
       if self.root_position == 0:
          return ToneDelta.__repr__(self)
 
-      notes = self.render()
       return '<%s: %s [root: %d]>' % (self.__class__.__name__, str(self), self.root_position)
 
 class WesternChord(Chord, WesternToneDelta):
@@ -355,6 +342,20 @@ class WesternChord(Chord, WesternToneDelta):
          new_deltas.append(12 - sum(self.deltas))
          self.deltas = new_deltas
          self.root_position = (self.root_position - 1) % (len(self.deltas)+1)
+
+   def render(self, root_tone=None):
+      if self.root_position == 0:
+         bass_note = copy(self.root_tone)
+      else:
+         bass_note = copy(self.root_tone)-sum(self.deltas[:self.root_position])
+         bass_note.truncate()
+
+      if not root_tone:
+         root_tone = copy(self.root_tone)
+      else:
+         root_tone += root_tone.delta(bass_note)
+
+      return WesternToneDelta.render(self, bass_note)
 
    def __repr__(self):
       if not self.chord_name:
@@ -475,56 +476,57 @@ def perform_analysis(chords, scales, args, current_depth=1):
    chords = list(chords)
    scales = list(scales)
 
+   if current_depth > 1:
+      depth_value = (current_depth-1) % 10
+      depths = ['st', 'nd', 'rd']
+
+      if depth_value > len(depths) and (current_depth > 20 or current_depth < 4):
+         depth_name = '%d%s' % (depth_value, 'th')
+      else:
+         depth_name = '%d%s' % (depth_value, depths[depth_value])
+
+      print '>> %s-order analysis' % depth_name
+
    while len(chords):
       chord = chords.pop(0)
 
       if not chord:
          continue
 
+      print 'Chord: %s %s => %s' % (chord.root_key, chord.get_chord_name(), str(chord))
+
+      if args.piano_roll:
+         print chord.piano_roll()
+
       if args.chord_scales:
          possible_scales = [MajorScale,NaturalMinorScale,HarmonicMinorScale,MelodicMinorScale]
-         working_chord = copy(chord)
-         origin_root = working_chord.root_position
 
-         applicable_scales = dict()
+         applicable_scales = set()
 
          for possible_scale in possible_scales:
-            for inversions in xrange(len(working_chord.deltas)):
-               root_tone = copy(working_chord.root_tone)
-               root_tone.truncate()
+            root_tone = copy(chord.root_tone)
+            root_tone.truncate()
 
-               for i in xrange(root_tone.modulus):
-                  new_scale = possible_scale(root_key=root_tone.identify())
+            for i in xrange(root_tone.modulus):
+               new_scale = possible_scale(root_key=root_tone.identify())
 
-                  if working_chord.is_tonal_subset_of(new_scale):
-                     applicable_scales.setdefault(copy(working_chord), set()).add(new_scale)
-                     new_scales.add(new_scale)
+               if chord.is_tonal_subset_of(new_scale):
+                  applicable_scales.add(new_scale)
+                  new_scales.add(new_scale)
 
-                     if not working_chord.root_position == origin_root:
-                        new_chords.add(copy(working_chord))
+               root_tone += 1
 
-                  root_tone.offset += 1
-                  root_tone.offset = int(root_tone)
+         applicable_scales = list(applicable_scales)
+         applicable_scales.sort(lambda x,y: cmp(x.root_tone, y.root_tone))
 
-               working_chord.invert()
+         if len(applicable_scales):
+            print '|\t>> Applicable scale analysis <<\n|\t'
 
-         captured_chords = applicable_scales.keys()
-         captured_chords.sort(lambda x,y: cmp(x.root_position, y.root_position))
-
-         for scaled_chord in captured_chords:
-            if not scaled_chord.root_position == 0:
-               print 'Chord inversion: %s %s => %s' % (scaled_chord.root_key, scaled_chord.get_chord_name(), str(scaled_chord))
-            else:
-               print 'Chord: %s %s => %s' % (scaled_chord.root_key, scaled_chord.get_chord_name(), str(scaled_chord))
+         for new_scale in applicable_scales:
+            print '|\tApplicable scale: %s %s => %s' % (new_scale.root_key, new_scale.scale_name, str(new_scale))
 
             if args.piano_roll:
-               print scaled_chord.piano_roll()
-
-            for new_scale in applicable_scales[scaled_chord]:
-               print 'Applicable scale: %s %s => %s' % (new_scale.root_key, new_scale.scale_name, str(new_scale))
-
-               if args.piano_roll:
-                  print new_scale.piano_roll()
+               print '|\t'+'\n|\t'.join(new_scale.piano_roll().split('\n'))+'\n|\t'
 
    while len(scales):
       scale = scales.pop(0)
@@ -617,6 +619,10 @@ def main():
                       ,'--chord-scales'
                       ,action='store_true'
                       ,help='select scales where the given chord appears.')
+   parser.add_argument('-i'
+                      ,'--chord-inversions'
+                      ,action='store_true'
+                      ,help='select all possible inversions of the selected chord.')
    parser.add_argument('-S'
                       ,'--scale-chords'
                       ,action='store_true'
@@ -636,8 +642,8 @@ def main():
    scale = None
 
    if not getattr(args, 'chord', None) and not getattr(args, 'scale', None):
-      sys.stderr.write('error: neither chord nor scale provided.')
-      parser.print_help()
+      sys.stderr.write('error: neither chord nor scale provided.\n')
+      parser.print_usage()
       sys.exit(1)
 
    if getattr(args, 'chord', None):
