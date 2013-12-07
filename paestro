@@ -6,7 +6,7 @@ import re
 import sys
 from copy import copy
 
-class ModuloRing:
+class ModuloRing(object):
    def __init__(self, **kwargs):
       self.modulus = kwargs['modulus']
       self.offset = kwargs.setdefault('offset', 0)
@@ -147,7 +147,7 @@ class WesternSemitone(Semitone):
 
       return relative_key
 
-class ToneDelta:
+class ToneDelta(object):
    DELTAS = None
    ROOT_TONE = None
 
@@ -181,19 +181,13 @@ class ToneDelta:
       return map(lambda x: (x.identify(), x), self.render(root_tone))
 
    def is_tonal_subset_of(self, tone_delta):
-      my_notes = set(self.render())
-      their_notes = set(tone_delta.render())
+      if not isinstance(tone_delta, ToneDelta):
+         raise ValueError('tone_delta most be of a ToneDelta type')
 
-      #print repr(self), ',', repr(tone_delta), ',', my_notes & their_notes
-      #print my_notes
-      #print their_notes
-      return my_notes <= their_notes
+      return set(self.render()) <= set(tone_delta.render())
 
    def is_tonal_superset_of(self, tone_delta):
-      my_notes = set(self.render())
-      their_notes = set(tone_delta.render())
-
-      return my_notes >= their_notes
+      return tone_delta.is_tonal_subset_of(self)
 
    def __repr__(self):
       return '<%s: %s>' % (self.__class__.__name__, str(self))
@@ -480,10 +474,10 @@ def perform_analysis(chords, scales, args, current_depth=1):
       depth_value = (current_depth-1) % 10
       depths = ['st', 'nd', 'rd']
 
-      if depth_value > len(depths) and (current_depth > 20 or current_depth < 4):
-         depth_name = '%d%s' % (depth_value, 'th')
+      if depth_value < len(depths) and (current_depth > 20 or current_depth < 4):
+         depth_name = '%d%s' % (depth_value+1, depths[depth_value])
       else:
-         depth_name = '%d%s' % (depth_value, depths[depth_value])
+         depth_name = '%d%s' % (depth_value+1, 'th')
 
       print '>> %s-order analysis' % depth_name
 
@@ -498,35 +492,36 @@ def perform_analysis(chords, scales, args, current_depth=1):
       if args.piano_roll:
          print chord.piano_roll()
 
-      if args.chord_scales:
-         possible_scales = [MajorScale,NaturalMinorScale,HarmonicMinorScale,MelodicMinorScale]
+      if not args.chord_scales:
+         continue
 
-         applicable_scales = set()
+      possible_scales = [MajorScale,NaturalMinorScale,HarmonicMinorScale,MelodicMinorScale]
+      applicable_scales = set()
 
-         for possible_scale in possible_scales:
-            root_tone = copy(chord.root_tone)
+      for possible_scale in possible_scales:
+         root_tone = copy(chord.root_tone)
+
+         for i in xrange(root_tone.modulus):
             root_tone.truncate()
+            new_scale = possible_scale(root_key=root_tone.identify())
 
-            for i in xrange(root_tone.modulus):
-               new_scale = possible_scale(root_key=root_tone.identify())
+            if chord.is_tonal_subset_of(new_scale):
+               applicable_scales.add(new_scale)
+               new_scales.add(new_scale)
 
-               if chord.is_tonal_subset_of(new_scale):
-                  applicable_scales.add(new_scale)
-                  new_scales.add(new_scale)
+            root_tone += 1
 
-               root_tone += 1
+      applicable_scales = list(applicable_scales)
+      applicable_scales.sort(lambda x,y: cmp(x.root_tone, y.root_tone))
 
-         applicable_scales = list(applicable_scales)
-         applicable_scales.sort(lambda x,y: cmp(x.root_tone, y.root_tone))
+      if len(applicable_scales):
+         print '|\t>> Applicable scale analysis <<\n|\t'
 
-         if len(applicable_scales):
-            print '|\t>> Applicable scale analysis <<\n|\t'
+      for new_scale in applicable_scales:
+         print '|\tApplicable scale: %s %s => %s' % (new_scale.root_key, new_scale.scale_name, str(new_scale))
 
-         for new_scale in applicable_scales:
-            print '|\tApplicable scale: %s %s => %s' % (new_scale.root_key, new_scale.scale_name, str(new_scale))
-
-            if args.piano_roll:
-               print '|\t'+'\n|\t'.join(new_scale.piano_roll().split('\n'))+'\n|\t'
+         if args.piano_roll:
+            print '|\t'+'\n|\t'.join(new_scale.piano_roll().split('\n'))+'\n|\t'
 
    while len(scales):
       scale = scales.pop(0)
@@ -534,31 +529,62 @@ def perform_analysis(chords, scales, args, current_depth=1):
       if not scale:
          continue
 
-      print 'Scale: %s' % str(scale)
+      print 'Scale: %s %s => %s' % (scale.root_key, scale.scale_name, str(scale))
 
       if args.piano_roll:
          print scale.piano_roll()
 
-   '''
-   for scale in scale_set:
-      target_chords = map(lambda c: c(root_key=root)
-                         ,(MajorChord
-                          ,MinorChord
-                          ,AugmentedChord
-                          ,DiminishedChord
-                          ,DominantSeventhChord
-                          ,MajorSeventhChord
-                          ,MinorSeventhChord
-                          ,HalfDiminishedSeventhChord
-                          ,DiminishedSeventhChord
-                          ,MinorMajorSeventhChord
-                          ,AugmentedMajorSeventhChord
-                          ,AugmentedSeventhChord))
-   '''
+      if not args.scale_chords:
+         continue
+
+      possible_chords = [MajorChord
+                        ,MinorChord
+                        ,AugmentedChord
+                        ,DiminishedChord
+                        ,DominantSeventhChord
+                        ,MajorSeventhChord
+                        ,MinorSeventhChord
+                        ,HalfDiminishedSeventhChord
+                        ,DiminishedSeventhChord
+                        ,MinorMajorSeventhChord
+                        ,AugmentedMajorSeventhChord
+                        ,AugmentedSeventhChord]
+      applicable_chords = set()
+
+      for possible_chord in possible_chords:
+         root_tone = copy(scale.root_tone)
+
+         for i in xrange(root_tone.modulus):
+            root_tone.truncate()
+            new_chord = possible_chord(root_key=root_tone.identify())
+
+            if new_chord.is_tonal_subset_of(scale):
+               applicable_chords.add(new_chord)
+               new_chords.add(new_chord)
+
+            root_tone += 1
+
+      applicable_chords = list(applicable_chords)
+      applicable_chords.sort(lambda x,y: cmp(x.root_tone, y.root_tone))
+
+      if len(applicable_chords):
+         print '|\t>> Applicable chord analysis <<\n|\t'
+
+      for new_chord in applicable_chords:
+         print '|\tApplicable chord: %s %s => %s' % (new_chord.root_key, new_chord.chord_name, str(new_chord))
+
+         if args.piano_roll:
+            print '|\t'+'\n|\t'.join(new_chord.piano_roll().split('\n'))+'\n|\t'
 
    if not len(new_chords) and not len(new_scales):
       return
    elif current_depth < args.depth:
+      new_chords = list(new_chords)
+      new_chords.sort()
+
+      new_scales = list(new_scales)
+      new_scales.sort()
+
       perform_analysis(new_chords, new_scales, args, current_depth+1)
 
 def main():
@@ -619,10 +645,6 @@ def main():
                       ,'--chord-scales'
                       ,action='store_true'
                       ,help='select scales where the given chord appears.')
-   parser.add_argument('-i'
-                      ,'--chord-inversions'
-                      ,action='store_true'
-                      ,help='select all possible inversions of the selected chord.')
    parser.add_argument('-S'
                       ,'--scale-chords'
                       ,action='store_true'
