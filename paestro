@@ -7,9 +7,14 @@ import sys
 from copy import copy
 
 class ModuloRing(object):
+   MODULUS = 2
+   OFFSET = 0
+   TRUNCATED = 1
+
    def __init__(self, **kwargs):
-      self.modulus = kwargs['modulus']
-      self.offset = kwargs.setdefault('offset', 0)
+      self.modulus = kwargs.setdefault('modulus', self.MODULUS)
+      self.offset = kwargs.setdefault('offset', self.OFFSET)
+      self.truncated = kwargs.setdefault('truncated', self.TRUNCATED)
 
    def delta(self, modulo):
       if not isinstance(modulo, ModuloRing):
@@ -21,7 +26,10 @@ class ModuloRing(object):
       self.offset %= self.modulus
 
    def __int__(self):
-      return self.offset % self.modulus
+      if self.truncated:
+         return self.offset % self.modulus
+      else:
+         return self.offset
 
    def __add__(self, value):
       new_ring = copy(self)
@@ -146,6 +154,10 @@ class WesternSemitone(Semitone):
          relative_key = '%s%s' % (relative_key, '#' * abs(root_delta))
 
       return relative_key
+
+   def frequency(self):
+      # we use 45 instead of 49 to chop off A0,A#0,B0 and compensate for zero-counting
+      return 2 ** ((int(self) - 45)/12.0) * 440
 
 class ToneDelta(object):
    DELTAS = None
@@ -291,6 +303,10 @@ class HarmonicMinorScale(Scale):
 class MelodicMinorScale(Scale):
    SCALE_NAME = 'melodic minor'
    DELTAS = (2,1,2,2,2,2,1)
+
+class PhygrianScale(Scale):
+   SCALE_NAME = 'phygrian'
+   DELTAS = (1,3,1,2,1,2,2)
 
 class Chord(ToneDelta):
    ROOT_POSITION = 0
@@ -443,7 +459,7 @@ def parse_chord(chord):
    return chord
 
 def parse_scale(scale):
-   key_groups = re.match('^(?P<root>[A-G][b#]?)(?P<accidental>[Mm]7?)$', scale)
+   key_groups = re.match('^(?P<root>[A-G][b#]?)(?P<accidental>[Mm]7?|P)$', scale)
 
    if not key_groups:
       raise ValueError("scale must match [A-G][b#]?[Mm]7?")
@@ -460,7 +476,8 @@ def parse_scale(scale):
       'M':   MajorScale,
       'm':   NaturalMinorScale,
       'm7':  HarmonicMinorScale,
-      'M7':  MelodicMinorScale
+      'M7':  MelodicMinorScale,
+      'P':   PhygrianScale
    }[accidental](root_key=root)
 
 def perform_analysis(chords, scales, args, current_depth=1):
@@ -495,7 +512,7 @@ def perform_analysis(chords, scales, args, current_depth=1):
       if not args.chord_scales:
          continue
 
-      possible_scales = [MajorScale,NaturalMinorScale,HarmonicMinorScale,MelodicMinorScale]
+      possible_scales = [MajorScale,NaturalMinorScale,HarmonicMinorScale,MelodicMinorScale,PhygrianScale]
       applicable_scales = set()
 
       for possible_scale in possible_scales:
@@ -600,14 +617,14 @@ def main():
       symbols with a slight variation. Scales can be explained with a
       simple regex:
 
-         [A-G][b#]?([Mm]7?)?
+         [A-G][b#]?([Mm]7?|P)?
 
       The following are examples of scales and their interpretations
       by Paestro:
 
          FM       F Major
          A#m      A Sharp Natural Minor
-         Cm7      C Harmonic Minor
+         CP       C Phygrian
          EbM7     E Flat Melodic Minor
 
       A similar format is followed for chords, with the following
